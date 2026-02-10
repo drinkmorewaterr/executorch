@@ -19,6 +19,7 @@ for more information.
 """
 
 import argparse
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -63,6 +64,64 @@ class PreqMode(str, Enum):
 
 
 @dataclass
+class LoraConfig:
+    """LoRA adapter configuration.
+
+    Can be created in two ways:
+
+    1. From an adapter_config JSON file:
+        LoraConfig(
+            adapter_checkpoint="/path/to/adapter.safetensors",
+            adapter_config="/path/to/adapter_config.json",
+        )
+
+    2. With explicit values:
+        LoraConfig(
+            adapter_checkpoint="/path/to/adapter.safetensors",
+            r=16,
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj"],
+        )
+    """
+
+    adapter_checkpoint: str
+    adapter_config: Optional[str] = None
+    r: int = 0
+    lora_alpha: int = 0
+    target_modules: List[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        has_explicit = (
+            self.r != 0 or self.lora_alpha != 0 or len(self.target_modules) > 0
+        )
+
+        if self.adapter_config and has_explicit:
+            raise ValueError(
+                "Cannot specify both adapter_config and individual LoRA "
+                "parameters (r, lora_alpha, target_modules). Use one or the other."
+            )
+
+        if self.adapter_config:
+            with open(self.adapter_config, "r") as f:
+                cfg = json.load(f)
+            for key in ("r", "lora_alpha", "target_modules"):
+                if key not in cfg:
+                    raise ValueError(
+                        f"adapter_config JSON is missing required key '{key}'"
+                    )
+            self.r = cfg["r"]
+            self.lora_alpha = cfg["lora_alpha"]
+            self.target_modules = cfg["target_modules"]
+
+        if self.r <= 0:
+            raise ValueError(f"LoRA rank (r) must be positive, got {self.r}")
+        if self.lora_alpha <= 0:
+            raise ValueError(f"lora_alpha must be positive, got {self.lora_alpha}")
+        if not self.target_modules:
+            raise ValueError("target_modules must be non-empty")
+
+
+@dataclass
 class BaseConfig:
     """
     Configurations specific to the model, e.g. whether it's Qwen3 or Phi-4-mini,
@@ -77,11 +136,7 @@ class BaseConfig:
             If left empty, the model will either be initialized with random weights
             if it is a Llama model or the weights will be downloaded from HuggingFace
             if it is a non-Llama model.
-        adapter_checkpoint: Path to the adapter.pt file from torchtune. Used if
-            the model has trained LoRA adapters. Must provide
-            adapter_config.json.
-        adapter_config: Path to the adapter_config.json file from torchtune.
-            Used if the model has trained LoRA adapters. Must provide adapter.pt.
+        lora_config: LoRA adapter configuration.
         tokenizer_path: Path to the tokenizer file.
         metadata: Json string containing metadata information.
             e.g. '"{\"get_bos_id\":128000, \"get_eos_ids\":[128009, 128001]}"'
@@ -98,8 +153,7 @@ class BaseConfig:
     model_class: ModelType = ModelType.llama3
     params: Optional[str] = None
     checkpoint: Optional[str] = None
-    adapter_checkpoint: Optional[str] = None
-    adapter_config: Optional[str] = None
+    lora_config: Optional[LoraConfig] = None
     tokenizer_path: Optional[str] = None
     metadata: Optional[str] = None
     use_lora: int = 0
@@ -536,10 +590,13 @@ class LlmConfig:
             llm_config.base.params = args.params
         if hasattr(args, "checkpoint"):
             llm_config.base.checkpoint = args.checkpoint
-        if hasattr(args, "adapter_checkpoint"):
-            llm_config.base.adapter_checkpoint = args.adapter_checkpoint
-        if hasattr(args, "adapter_config"):
-            llm_config.base.adapter_config = args.adapter_config
+        if hasattr(args, "adapter_checkpoint") and args.adapter_checkpoint:
+            if not hasattr(args, "adapter_config") or not args.adapter_config:
+                raise ValueError("--adapter_checkpoint requires --adapter_config")
+            llm_config.base.lora_config = LoraConfig(
+                adapter_checkpoint=args.adapter_checkpoint,
+                adapter_config=args.adapter_config,
+            )
         if hasattr(args, "tokenizer_path"):
             llm_config.base.tokenizer_path = args.tokenizer_path
         if hasattr(args, "metadata"):
