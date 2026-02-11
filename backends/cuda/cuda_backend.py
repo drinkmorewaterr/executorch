@@ -24,6 +24,7 @@ from executorch.exir.backend.compile_spec_schema import CompileSpec
 from torch._inductor.decomposition import conv1d_to_conv2d
 from torch.nn.attention import SDPBackend
 
+import logging
 
 @final
 @experimental(
@@ -117,6 +118,11 @@ class CudaBackend(AotiBackend, BackendDetails):
                     return False
                 os.environ["TRITON_PTXAS_PATH"] = ptxas_path
 
+            if os.environ.get("TORCH_CUDA_ARCH_LIST") is not None:
+                logging.warning(
+                    f"TORCH_CUDA_ARCH_LIST is set to {os.environ.get('TORCH_CUDA_ARCH_LIST')}, skipping automatic architecture detection."
+                )
+                return True
             # Get compute capability of current CUDA device
             device = torch.cuda.current_device()
             capability = torch.cuda.get_device_capability(device)

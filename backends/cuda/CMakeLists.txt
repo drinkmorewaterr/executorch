@@ -33,6 +33,13 @@ set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
 
 find_package(CUDAToolkit REQUIRED)
 
+# Ensure CUDA language is enabled so .cu sources are compiled.
+# Without this, some Windows generator/toolchain combinations may silently skip
+# CUDA compilation units in mixed C++/CUDA targets.
+if(NOT CMAKE_CUDA_COMPILER)
+  enable_language(CUDA)
+endif()
+
 # Use ExecuTorch's standard way to find PyTorch libraries for AOTI
 include(${EXECUTORCH_ROOT}/tools/cmake/Utils.cmake)
 find_package_torch()
@@ -47,8 +54,9 @@ target_include_directories(
 )
 target_compile_options(
   cuda_tensor_maker
-  PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/EHsc /GR>
-         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fexceptions -frtti -fPIC>
+  PUBLIC
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/EHsc /GR>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-fexceptions -frtti -fPIC>
 )
 # Ensure symbols are exported properly
 if(APPLE)
@@ -84,8 +92,9 @@ target_include_directories(
 
 target_compile_options(
   cuda_platform
-  PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/EHsc /GR>
-         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fexceptions -frtti -fPIC>
+  PUBLIC
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/EHsc /GR>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-fexceptions -frtti -fPIC>
 )
 
 # Link against ExecuTorch core libraries
@@ -108,10 +117,14 @@ add_library(aoti_cuda_shims SHARED ${_aoti_cuda_shim_sources})
 # Define CUDA_AVAILABLE to use SlimTensor on GPU in common_shims_slim.h
 target_compile_definitions(aoti_cuda_shims PRIVATE CUDA_AVAILABLE=1)
 
-# Define export macros for shared library
-if(MSVC)
+# Define export macros for shared library.
+# Use WIN32 (not just MSVC) so MinGW cross-compiles also emit dllexport
+# symbols for AOTI shims.
+if(WIN32)
   target_compile_definitions(aoti_cuda_shims PRIVATE EXPORT_AOTI_FUNCTIONS)
+endif()
 
+if(MSVC)
   # Ensure proper DLL import/export library naming on Windows
   set_target_properties(
     aoti_cuda_shims PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF
@@ -126,8 +139,9 @@ target_include_directories(
 
 target_compile_options(
   aoti_cuda_shims
-  PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/EHsc /GR>
-         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fexceptions -frtti -fPIC>
+  PUBLIC
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/EHsc /GR>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-fexceptions -frtti -fPIC>
 )
 
 # Ensure symbols are exported properly
@@ -136,18 +150,23 @@ target_link_options(
 )
 
 # Link against CUDA::cudart, common AOTI library, cuda_tensor_maker, and
-# platform utilities. Use --whole-archive for aoti_common_shims_slim to ensure
-# all symbols are exported from this shared library.
+# platform utilities. On non-MSVC, use --whole-archive for
+# aoti_common_shims_slim to force shim symbol retention.
 target_link_libraries(
   aoti_cuda_shims
   PRIVATE cuda_platform
   PUBLIC $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wl,--whole-archive>
-         aoti_common_shims_slim
+         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:aoti_common_shims_slim>
          $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wl,--no-whole-archive>
          cuda_tensor_maker
          CUDA::cudart
          ${CMAKE_DL_LIBS}
 )
+if(MSVC)
+  # Link object library directly so symbols are pulled exactly once while
+  # avoiding duplicate static/object inclusion and interface leakage.
+  target_link_libraries(aoti_cuda_shims PRIVATE aoti_common_shims_slim_obj)
+endif()
 
 if(NOT MSVC)
   executorch_target_link_options_shared_lib(aoti_cuda_shims)
@@ -172,8 +191,9 @@ target_include_directories(
 )
 target_compile_options(
   aoti_cuda_backend
-  PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/EHsc /GR>
-         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fexceptions -frtti -fPIC>
+  PUBLIC
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/EHsc /GR>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-fexceptions -frtti -fPIC>
 )
 # Ensure symbols are exported properly
 target_link_options(
@@ -191,7 +211,12 @@ target_link_libraries(
 )
 
 if(MSVC)
-  target_link_libraries(aoti_cuda_backend PRIVATE aoti_cuda_shims)
+  # cuda_backend.cpp uses SlimTensor CUDA utilities (e.g. getCurrentCUDAStream)
+  # from aoti_common_shims_slim via headers; propagate the static lib so final
+  # MSVC links (e.g. parakeet_runner) can resolve those C++ symbols.
+  target_link_libraries(
+    aoti_cuda_backend PRIVATE aoti_cuda_shims PUBLIC aoti_common_shims_slim
+  )
 else()
   target_link_libraries(aoti_cuda_backend PUBLIC aoti_cuda_shims)
 endif()
